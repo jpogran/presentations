@@ -1,0 +1,3 @@
+[submodule "puppetconf/2017/control-repo"]
+	path = puppetconf/puppetconf2017/control-repo
+	url = https://github.com/jpogran/control-repo

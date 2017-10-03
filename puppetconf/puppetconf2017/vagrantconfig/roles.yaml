@@ -1,0 +1,162 @@
+---
+roles:
+  base:
+    private_networks:
+      - {ip: '0.0.0.0', auto_network: true}
+    provisioners:
+      - type: hosts
+        name: 'base networking'
+        preserve_order: true
+        sync_hosts: true
+        add_localhost_hostnames: false
+        hosts:
+          - ['@vagrant_private_networks', ['@vagrant_hostnames']]
+        imports: ['global', 'virtualbox', 'vmware']
+        exports:
+          virtualbox:
+            - ['@vagrant_private_networks', ['@vagrant_hostnames']]
+    providers:
+      - type: virtualbox
+        linked_clone: true
+  
+  windows:
+    guest: windows
+    communicator: winrm
+    forwarded_ports:
+      - {guest: 3389, host: 3389, auto_correct: true, id: rdp}
+    providers:
+      - type: virtualbox
+        customize:
+          - [modifyvm, !ruby/sym id, "--natdnshostresolver1", "on"]
+          - [modifyvm, !ruby/sym id, "--audio", "none"]
+          - [modifyvm, !ruby/sym id, "--clipboard", "bidirectional"]
+          - [modifyvm, !ruby/sym id, "--usb", "off"]
+  
+  show-windows-vm:
+    providers:
+      - type: virtualbox
+        gui: true
+
+  configure_windows:
+    provisioners:
+      - type: shell
+        name: "configure PSRemoting, stop and disable firewall, install cert"
+        path: './dsc-repo/windowssetup.ps1'
+
+  pe-puppet-master:
+    forwarded_ports:
+      - {guest: 443, host: 4443, auto_correct: true}
+    providers:
+      - type: virtualbox
+        customize:
+          - [modifyvm, !ruby/sym id, '--memory', 8192]
+    provisioners:
+      - type: pe_bootstrap
+        role: :master
+        answer_extras:
+          - |
+            "puppet_enterprise::profile::master::code_manager_auto_configure": true
+            "puppet_enterprise::profile::master::r10k_remote": "https://github.com/jpogran/control-repo"
+            "puppet_enterprise::profile::console::console_services_plaintext_status_enabled": true
+
+  pe-puppet-agent:
+    private_networks:
+      - {ip: '0.0.0.0', auto_network: true, add_localhost_hostnames: false}
+    providers:
+      - type: virtualbox
+        linked_clone: true
+    provisioners:
+      - {type: hosts, sync_hosts: true}
+      - {type: pe_agent, master_vm: master}
+
+  pe_code_manager_bootstrap:
+    provisioners:
+      - type: shell
+        name: 'bootstrap code manager'
+        inline: |
+          if [[ $(stat -c '%U' /etc/puppetlabs/puppetserver/keys/) != 'pe-puppet' ]]; then
+            echo "Bootstrapping Code Manager."
+            export PATH=/opt/puppetlabs/puppet/bin:$PATH
+            chown -R pe-puppet:pe-puppet /etc/puppetlabs/puppetserver/keys
+            chmod 0700 /etc/puppetlabs/puppetserver/keys
+            chmod 0600 /etc/puppetlabs/puppetserver/keys/*
+            # Deploy code.
+            # NOTE: $PATH doesn't survive sudo.
+            sudo -u pe-puppet /opt/puppetlabs/puppet/bin/r10k \
+              deploy environment -pv \
+              -c /opt/puppetlabs/server/data/code-manager/r10k.yaml
+            # Kick file sync.
+            curl -ks -X POST -H "Content-Type: application/json" \
+              --cert $(puppet config print hostcert) \
+              --key $(puppet config print hostprivkey) \
+              --data '{"commit-all": true}' \
+              'https://127.0.0.1:8140/file-sync/v1/commit' | \
+            python -m json.tool
+          fi
+      - type: shell
+        name: 'setup Vagrant RBAC user'
+        inline: |
+          echo "Creating RBAC vagrant user."
+          sudo curl -ks -X POST -H "Content-Type: application/json" \
+            --cert /etc/puppetlabs/puppet/ssl/certs/master.vm.pem \
+            --key /etc/puppetlabs/puppet/ssl/private_keys/master.vm.pem \
+            --cacert /etc/puppetlabs/puppet/ssl/certs/ca.pem \
+            --data '{"login":"vagrant", "email":"", "display_name":"Vagrant User", "role_ids": [1], "password": "vagrant"}' \
+            'https://master.vm:4433/rbac-api/v1/users' | \
+          python -m json.tool
+          exit 0
+
+  pe_provision_puppetserver_keys:
+    provisioners:
+      - type: shell
+        name: 'provision puppetserver keys'
+        inline: |
+          echo "Bootstrapping Code Manager."
+          if [[ ! -e /etc/puppetlabs/puppetserver/keys/code-manager.key ]]; then
+            echo "Provisioning Puppet Server keys."
+            mkdir -p /etc/puppetlabs/puppetserver/keys/
+            cp /vagrant/vagrantconfig/keys/* /etc/puppetlabs/puppetserver/keys/
+          fi
+
+  pe_post_install_config:
+    provisioners:
+      - type: shell
+        name: "stop and disable firewall"
+        inline: |
+          RH_VERS=$(rpm -q --qf "%{VERSION}" $(rpm -q --whatprovides redhat-release)|grep -o '^[0-9]')
+          if [ "$RH_VERS" -gt "6" ]; then
+            systemctl stop firewalld.service
+            systemctl disable firewalld.service
+          else
+            service iptables stop
+            chkconfig iptables off
+          fi
+          # Some templates have firewalls configured weird. Just return success.
+          exit 0
+      - type: shell
+        name: "add user/local/bin to path"
+        inline: |
+          echo "export PATH=$PATH:/usr/local/bin" > /etc/profile.d/path_fix.sh
+
+
+  dsc-pull-server:
+    providers:
+      - type: virtualbox
+        gui: true
+        customize:
+          - [modifyvm, !ruby/sym id, "--cpus", 1]
+          - [modifyvm, !ruby/sym id, "--memory", 2024]
+          - [modifyvm, !ruby/sym id, "--vram", 256]
+    provisioners:
+      - {type: shell, path: './dsc-repo/run_dsc.ps1'}
+
+  dsc-agent:
+    providers:
+      - type: virtualbox
+        gui: true
+        customize:
+          - [modifyvm, !ruby/sym id, "--cpus", 1]
+          - [modifyvm, !ruby/sym id, "--memory", 1024]
+          - [modifyvm, !ruby/sym id, "--vram", 256]
+    provisioners:
+      - {type: shell, path: './dsc-repo/agent.ps1'}
