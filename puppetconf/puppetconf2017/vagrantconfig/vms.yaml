@@ -1,0 +1,38 @@
+---
+vms:
+- name: master
+  box: puppetlabs/centos-7.2-64-nocm
+  roles:
+  - pe_post_install_config
+  - pe_code_manager_bootstrap
+  - pe-puppet-master
+  - pe_provision_puppetserver_keys
+  - base
+
+- name: pe-agent
+  hostname: windows2016
+  box: windows-2016-x86_64-virtualbox-base
+  provisioners:
+    - {type: pe_agent, master_vm: master}
+  roles:
+  - dont-show-windows-vm
+  - windows
+  - base
+
+- name: pullserver
+  box: windows-2016-x86_64-virtualbox-base
+  roles:
+  - dsc-pull-server
+  - show-windows-vm
+  - configure_windows
+  - windows
+  - base
+
+- name: dsc-agent
+  box: windows-2016-x86_64-virtualbox-base
+  roles:
+  - dsc-agent
+  - configure_windows
+  - dont-show-windows-vm
+  - windows
+  - base
